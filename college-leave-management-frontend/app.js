@@ -242,15 +242,7 @@ async function fetchRoleLeaves(statuses=null) {
   return data || [];
 }
 
-async function renderApprovals() {
-  if (state.profile.role === "hod") {
-    return approvalDashboard("HOD");
-  }
-  if (state.profile.role === "principal") {
-    return approvalDashboard("Principal");
-  }
-  throw new Error("This section is only available to HODs and the Principal.");
-}
+
 async function renderApprovals() {
   if (state.profile.role === "hod") {
     return approvalDashboard("HOD");
