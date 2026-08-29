@@ -293,7 +293,7 @@ async function fetchRoleLeaves(statuses=null) {
   if (profileIds.length) {
     const {data: profilesByUuid, error: uuidError} = await supabaseClient
       .from("profiles")
-      .select("id,full_name,email,employee_id,department,role")
+      .select("id,full_name,email,department,role")
       .in("id", profileIds);
 
     if (uuidError) {
@@ -304,24 +304,6 @@ async function fetchRoleLeaves(statuses=null) {
       });
     }
 
-    const employeeNumbers = [...new Set(
-      leaves.map(l => l.employee_id).filter(Boolean)
-    )];
-
-    if (employeeNumbers.length) {
-      const {data: profilesByEmployeeId, error: employeeIdError} = await supabaseClient
-        .from("profiles")
-        .select("id,full_name,email,employee_id,department,role")
-        .in("employee_id", employeeNumbers);
-
-      if (employeeIdError) {
-        console.warn("Could not read profiles by employee_id:", employeeIdError);
-      } else {
-        (profilesByEmployeeId || []).forEach(p => {
-          if (!profilesById[p.id]) profilesById[p.id] = p;
-        });
-      }
-    }
   }
 
   return leaves.map(l => {
