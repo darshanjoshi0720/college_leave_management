@@ -441,7 +441,8 @@ function openCreateUser(){
       <div><label>Department</label>
         <select id="newDepartment">
           <option value="">Select department</option>
-          <option value="ECE">ECE</option>
+          <option value="First Year Engineering">First Year Engineering</option>
+         <option value="ECE">ECE</option>
           <option value="CSE">CSE</option>
           <option value="EEE">EEE</option>
           <option value="MECH">MECH</option>
