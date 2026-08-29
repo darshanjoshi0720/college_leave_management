@@ -348,7 +348,7 @@ function renderReviewCard(l) {
   return `<div class="review-card">
     <div class="review-top"><div>
       <h4>${esc(l.leave_type)} · ${l.days} day(s)</h4>
-      <p><strong>${esc(employeeName)}</strong>${employee?.employee_id ? ` · Employee ID: ${esc(employee.employee_id)}` : ""}</p>
+      <p><strong>${esc(employeeName)}</strong>${""}</p>
     </div>${statusBadge(l.status)}</div>
 
     <div class="details">
@@ -411,7 +411,7 @@ async function renderHistory() {
 }
 
 async function renderUsers() {
-  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,employee_id,department,role,active").order("role").order("full_name");
+  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,department,role,active").order("role").order("full_name");
   if(error) throw error;
   state.users=data||[];
   $("content").innerHTML = `<div class="welcome"><div><div class="eyebrow">ADMINISTRATION</div><h2>User management</h2><p>Create and manage institutional accounts.</p></div><button class="btn btn-primary" onclick="openCreateUser()">＋ Create User</button></div>
@@ -500,7 +500,7 @@ async function init() {
 }
 
 async function loadProfile(user){
-  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,employee_id,department,role,active").eq("id",user.id).single();
+  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,department,role,active").eq("id",user.id).single();
   if(error || !data || !data.active){await supabaseClient.auth.signOut();showLogin();toast("Your active portal profile could not be loaded.","error");return;}
   state.user=user; state.profile=data; showApp();
 }
