@@ -2,6 +2,20 @@
 const SUPABASE_URL = "https://hkazpnrlbitkbyymnoof.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_N9oiyMHSv3yr7z2IBa7YrQ_0uKsvZ-4";
 
+const DEPARTMENTS = [
+  "ECE",
+  "CSE",
+  "EEE",
+  "MECH",
+  "CIVIL",
+  "IT",
+  "AI & DS",
+  "AI & ML",
+  "MBA",
+  "MCA"
+];
+
+
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 const state = {
@@ -98,7 +112,7 @@ async function renderRoute(route) {
     if (route === "dashboard") return renderDashboard();
     if (route === "apply") return renderApply();
     if (route === "my-leaves") return renderMyLeaves();
-    if (route === "approvals") return renderApprovals();
+    if (route === "approvals") return approvalDashboard(state.profile.role === "hod" ? "HOD" : "Principal");
     if (route === "history") return renderHistory();
     if (route === "users") return renderUsers();
     if (route === "applications") return renderAllApplications();
@@ -235,45 +249,75 @@ async function renderMyLeaves() {
 }
 
 async function fetchRoleLeaves(statuses=null) {
-  let q = supabaseClient.from("leave_applications").select("id,employee_id,leave_type,start_date,end_date,days,reason,class_arrangement,status,hod_decision,hod_remarks,hod_reviewed_at,principal_decision,principal_remarks,principal_reviewed_at,submitted_at").order("submitted_at",{ascending:true});
+  let q = supabaseClient.from("leave_applications")
+    .select("id,employee_id,leave_type,start_date,end_date,days,reason,class_arrangement,status,hod_decision,hod_remarks,hod_reviewed_by,hod_reviewed_at,principal_decision,principal_remarks,principal_reviewed_by,principal_reviewed_at,submitted_at")
+    .order("submitted_at",{ascending:true});
   if (statuses) q = q.in("status", statuses);
   const {data,error}=await q;
   if(error) throw error;
-  return data || [];
+  const leaves = data || [];
+
+  const ids = [...new Set(leaves.flatMap(l => [l.employee_id, l.hod_reviewed_by, l.principal_reviewed_by].filter(Boolean)))];
+  if (!ids.length) return leaves;
+
+  const {data: profiles, error: profileError} = await supabaseClient
+    .from("profiles")
+    .select("id,full_name,email,department,role")
+    .in("id", ids);
+  if (profileError) throw profileError;
+
+  const byId = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+  return leaves.map(l => ({
+    ...l,
+    employee_profile: byId[l.employee_id] || null,
+    hod_profile: byId[l.hod_reviewed_by] || null,
+    principal_profile: byId[l.principal_reviewed_by] || null
+  }));
 }
 
-
-async function renderApprovals() {
-  if (state.profile.role === "hod") {
-    return approvalDashboard("HOD");
-  }
-
-  if (state.profile.role === "principal") {
-    return approvalDashboard("Principal");
-  }
-
-  throw new Error("This section is only available to HODs and the Principal.");
-}
 async function approvalDashboard(role) {
   const statuses = role === "HOD" ? ["pending_hod"] : ["awaiting_principal"];
   const leaves = await fetchRoleLeaves(statuses);
+  const department = state.profile.department || "Department not assigned";
+  const isPrincipal = role === "Principal";
   $("content").innerHTML = `
-    <div class="welcome"><div><div class="eyebrow">${role.toUpperCase()} PORTAL</div><h2>${role === "HOD" ? "Leave approvals" : "Final approvals"}</h2><p>${leaves.length} application(s) require your attention.</p></div></div>
-    <div class="grid stats">${stat("Awaiting Review",leaves.length,role==="HOD"?"Pending HOD decision":"HOD-approved requests")}${stat("Approval Stage",role==="HOD"?"HOD":"Principal","Current responsibility")}${stat("Required Action",leaves.length,"Review applications")}${stat("Workflow","2-step","HOD + Principal")}</div>
-    <div class="panel"><div class="panel-head"><div><h3>${role === "HOD" ? "Pending HOD applications" : "HOD-approved applications"}</h3><p>Review the details before making a decision.</p></div></div><div class="panel-body" id="reviewList">${leaves.length ? leaves.map(renderReviewCard).join("") : `<div class="empty">No applications are waiting for you.</div>`}</div></div>`;
+    <div class="welcome">
+      <div>
+        <div class="eyebrow">${role.toUpperCase()} PORTAL</div>
+        <h2>${role === "HOD" ? "Leave approvals" : "Final approvals"}</h2>
+        <p>${isPrincipal ? "Review HOD-approved leave applications from every department." : `Department: <strong>${esc(department)}</strong> · ${leaves.length} application(s) require your attention.`}</p>
+      </div>
+      ${role === "HOD" ? `<div class="detail"><small>Your Department</small><strong>${esc(department)}</strong></div>` : `<div class="detail"><small>Scope</small><strong>All Departments</strong></div>`}
+    </div>
+    <div class="grid stats">
+      ${stat("Awaiting Review",leaves.length,role==="HOD"?"Pending HOD decision":"HOD-approved requests")}
+      ${stat("Approval Stage",role==="HOD"?"HOD":"Principal","Current responsibility")}
+      ${stat("Required Action",leaves.length,"Review applications")}
+      ${stat("Workflow","2-step","HOD + Principal")}
+    </div>
+    <div class="panel">
+      <div class="panel-head"><div><h3>${role === "HOD" ? `Pending ${esc(department)} HOD applications` : "HOD-approved applications"}</h3><p>${isPrincipal ? "Each request below shows the department and the HOD who approved it." : `Only ${esc(department)} department requests assigned to you are shown.`}</p></div></div>
+      <div class="panel-body" id="reviewList">${leaves.length ? leaves.map(renderReviewCard).join("") : `<div class="empty">No applications are waiting for you.</div>`}</div>
+    </div>`;
 }
 
 function renderReviewCard(l) {
+  const employee = l.employee_profile;
+  const employeeName = employee?.full_name || l.employee_id;
+  const department = employee?.department || "Department not assigned";
+  const hod = l.hod_profile;
+  const hodName = hod?.full_name || "HOD";
   return `<div class="review-card">
-    <div class="review-top"><div><h4>${esc(l.leave_type)} · ${l.days} day(s)</h4><p>Employee ID: ${esc(l.employee_id)}</p></div>${statusBadge(l.status)}</div>
+    <div class="review-top"><div><h4>${esc(l.leave_type)} · ${l.days} day(s)</h4><p><strong>${esc(employeeName)}</strong> · Employee ID: ${esc(employee?.employee_id || l.employee_id)}</p></div>${statusBadge(l.status)}</div>
     <div class="details">
+      <div class="detail"><small>Department</small><strong>${esc(department)}</strong></div>
       <div class="detail"><small>Start</small><strong>${esc(l.start_date)}</strong></div>
       <div class="detail"><small>End</small><strong>${esc(l.end_date)}</strong></div>
       <div class="detail"><small>Submitted</small><strong>${new Date(l.submitted_at).toLocaleDateString()}</strong></div>
     </div>
+    ${state.profile.role === "principal" ? `<div class="reason"><strong>HOD Approval</strong><br>${esc(hodName)}${hod?.department ? ` · ${esc(hod.department)} Department` : ""}${l.hod_reviewed_at ? `<br><span class="kpi-note">Approved on ${new Date(l.hod_reviewed_at).toLocaleDateString()}</span>` : ""}${l.hod_remarks ? `<br><span class="kpi-note">Remarks: ${esc(l.hod_remarks)}</span>` : ""}</div>` : ""}
     <div class="reason"><strong>Reason</strong><br>${esc(l.reason)}</div>
     <div class="reason"><strong>Class arrangement</strong><br>${esc(l.class_arrangement)}</div>
-    ${state.profile.role === "principal" ? `<div class="reason"><strong>HOD decision</strong><br>${esc(l.hod_decision || "")}${l.hod_remarks ? `<br><span class="kpi-note">Remarks: ${esc(l.hod_remarks)}</span>`:""}</div>` : ""}
     <div class="action-row">
       <button class="btn btn-success" onclick="openDecision('${l.id}','approved')">Approve</button>
       <button class="btn btn-danger" onclick="openDecision('${l.id}','rejected')">Reject</button>
@@ -339,7 +383,7 @@ function openCreateUser(){
       <div><label>Full name</label><input id="newName"></div>
       <div><label>Email</label><input id="newEmail" type="email"></div>
       <div><label>Employee ID</label><input id="newEmployeeId" placeholder="Optional"></div>
-      <div><label>Department</label><input id="newDepartment" placeholder="Optional"></div>
+      <div><label>Department</label><select id="newDepartment"><option value="">Select department</option>${DEPARTMENTS.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join("")}</select></div>
       <div class="full"><label>Role</label><select id="newRole"><option value="employee">Employee</option><option value="hod">HOD</option><option value="principal">Principal</option></select></div>
     </div>
     <div class="modal-actions"><button class="btn btn-light" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="createUser()">Create User</button></div>
@@ -355,6 +399,7 @@ async function createUser(){
     role:$("newRole").value
   };
   if(!body.email||!body.full_name){toast("Name and email are required.","error");return;}
+  if((body.role === "employee" || body.role === "hod") && !body.department){toast("Select a department for an Employee or HOD.","error");return;}
   const {data:{session}}=await supabaseClient.auth.getSession();
   const res=await fetch(`${SUPABASE_URL}/functions/v1/create-user`,{
     method:"POST",
@@ -427,14 +472,12 @@ supabaseClient.auth.onAuthStateChange(async(event,session)=>{
 });
 
 window.navigate=navigate;
-window.renderApprovals=renderApprovals;
 window.submitLeave=submitLeave;
 window.openDecision=openDecision;
 window.closeModal=closeModal;
 window.submitDecision=submitDecision;
 window.openCreateUser=openCreateUser;
 window.createUser=createUser;
-// Vercel deployment update
 window.filterUsers=filterUsers;
 
 init();
