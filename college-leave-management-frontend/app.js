@@ -232,23 +232,6 @@ async function submitLeave() {
     return;
   }
 
-  // If leave_applications has a department column, keep the new record tagged
-  // with the employee's current department. The server-side submit_leave
-  // function should ideally populate this itself; this is only a fallback.
-  const leaveId = data?.id;
-  if (leaveId && state.profile.department) {
-    const { error: departmentError } = await supabaseClient
-      .from("leave_applications")
-      .update({ department: state.profile.department })
-      .eq("id", leaveId)
-      .eq("employee_id", state.user.id);
-
-    if (departmentError) {
-      // Do not fail a valid leave submission because of an RLS restriction.
-      console.warn("Department backfill was not permitted:", departmentError);
-    }
-  }
-
   toast("Leave application submitted to the HOD.", "success");
   navigate("my-leaves");
 }
@@ -261,71 +244,62 @@ async function renderMyLeaves() {
 }
 
 async function fetchRoleLeaves(statuses=null) {
-  let q = supabaseClient
-    .from("leave_applications")
-    .select(`
-      id,employee_id,department,leave_type,start_date,end_date,days,reason,class_arrangement,
-      status,hod_decision,hod_remarks,hod_reviewed_by,hod_reviewed_at,
-      principal_decision,principal_remarks,principal_reviewed_by,principal_reviewed_at,submitted_at
-    `)
-    .order("submitted_at",{ascending:true});
-
-  if (statuses) q = q.in("status", statuses);
-
-  const {data,error}=await q;
-  if(error) throw error;
-
-  const leaves = data || [];
-  if (!leaves.length) return leaves;
-
-  // employee_id normally contains the profile UUID.
-  // The second lookup below also supports institutional employee IDs.
-  const profileIds = [...new Set(
-    leaves.flatMap(l => [
-      l.employee_id,
-      l.hod_reviewed_by,
-      l.principal_reviewed_by
-    ].filter(Boolean))
-  )];
-
-  const profilesById = {};
-
-  if (profileIds.length) {
-    const {data: profilesByUuid, error: uuidError} = await supabaseClient
-      .from("profiles")
-      .select("id,full_name,email,department,role")
-      .in("id", profileIds);
-
-    if (uuidError) {
-      console.warn("Could not read profiles by UUID:", uuidError);
-    } else {
-      (profilesByUuid || []).forEach(p => {
-        profilesById[p.id] = p;
-      });
-    }
-
-  }
-
-  return leaves.map(l => {
-    const employee = profilesById[l.employee_id] || null;
-    const hod = profilesById[l.hod_reviewed_by] || null;
-    const principal = profilesById[l.principal_reviewed_by] || null;
-
-    return {
-      ...l,
-
-      // Prefer the department stored on the leave application.
-      // If it is NULL, use the employee profile department.
-      department: l.department || employee?.department || null,
-
-      employee_profile: employee,
-      hod_profile: hod,
-      principal_profile: principal,
-
-      // Used by history/admin tables so they show the name instead of a UUID.
-      employee_name: employee?.full_name || null
-    };
+  // Use the protected server-side RPC so HOD/Principal users can see
+  // employee names without requiring direct access to every profiles row.
+  const { data, error } = await supabaseClient.rpc("get_leave_applications", {
+    p_statuses: statuses || null
   });
+  if (error) throw error;
+
+  const leaves = (data || []).map(l => ({
+    ...l,
+    employee_name: l.employee_name || null,
+    employee_profile: l.employee_name ? {
+      id: l.employee_id,
+      full_name: l.employee_name,
+      email: l.employee_email,
+      department: l.employee_department || l.department,
+      role: "employee"
+    } : null,
+    hod_profile: l.hod_name ? {
+      id: l.hod_id || l.hod_reviewed_by,
+      full_name: l.hod_name,
+      email: l.hod_email,
+      department: l.hod_department || l.department,
+      role: "hod"
+    } : null,
+    principal_profile: l.principal_name ? {
+      id: l.principal_reviewed_by,
+      full_name: l.principal_name,
+      email: l.principal_email,
+      department: l.principal_department,
+      role: "principal"
+    } : null
+  }));
+
+  return leaves;
+}
+
+async function renderApprovals() {
+  if (state.profile.role === "hod") return approvalDashboard("HOD");
+  if (state.profile.role === "principal") return approvalDashboard("Principal");
+  throw new Error("Approval section is not available for this account.");
+}
+
+function adminDashboard() {
+  const leaves = state.leaves || [];
+  const pending = leaves.filter(x => x.status === "pending_hod").length;
+  const awaiting = leaves.filter(x => x.status === "awaiting_principal").length;
+  const approved = leaves.filter(x => x.status === "approved").length;
+  $("content").innerHTML = `
+    <div class="welcome"><div><div class="eyebrow">ADMINISTRATION</div><h2>Administration dashboard</h2><p>Manage users and monitor the two-stage leave workflow.</p></div></div>
+    <div class="grid stats">
+      ${stat("Pending HOD",pending,"Waiting for department HOD")}
+      ${stat("Awaiting Principal",awaiting,"HOD-approved requests")}
+      ${stat("Approved",approved,"Final approved")}
+      ${stat("Departments",DEPARTMENTS.length,"Configured departments")}
+    </div>
+    <div class="panel"><div class="panel-head"><div><h3>Administration</h3><p>Use the navigation to manage users or review all applications.</p></div></div></div>`;
 }
 
 async function approvalDashboard(role) {
