@@ -2,19 +2,6 @@
 const SUPABASE_URL = "https://hkazpnrlbitkbyymnoof.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_N9oiyMHSv3yr7z2IBa7YrQ_0uKsvZ-4";
 
-const DEPARTMENTS = [
-  "ECE",
-  "CSE",
-  "EEE",
-  "MECH",
-  "CIVIL",
-  "IT",
-  "AI & DS",
-  "AI & ML",
-  "MBA",
-  "MCA"
-];
-
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 const state = {
@@ -252,11 +239,8 @@ async function fetchRoleLeaves(statuses=null) {
     .from("leave_applications")
     .select(`
       id,employee_id,leave_type,start_date,end_date,days,reason,class_arrangement,
-      status,hod_decision,hod_remarks,hod_reviewed_at,
-      principal_decision,principal_remarks,principal_reviewed_at,submitted_at,
-      employee:profiles!leave_applications_employee_id_fkey(
-        full_name,email,employee_id,department,hod_id
-      )
+      status,hod_decision,hod_remarks,hod_reviewed_by,hod_reviewed_at,
+      principal_decision,principal_remarks,principal_reviewed_by,principal_reviewed_at,submitted_at
     `)
     .order("submitted_at",{ascending:true});
 
@@ -264,7 +248,39 @@ async function fetchRoleLeaves(statuses=null) {
 
   const {data,error}=await q;
   if(error) throw error;
-  return data || [];
+
+  const leaves = data || [];
+
+  // Fetch the related profiles explicitly. This avoids depending on
+  // Supabase's embedded-relationship/FK name and guarantees that the
+  // employee name and department are available to the Principal.
+  const ids = [...new Set(
+    leaves.flatMap(l => [
+      l.employee_id,
+      l.hod_reviewed_by,
+      l.principal_reviewed_by
+    ].filter(Boolean))
+  )];
+
+  if (!ids.length) return leaves;
+
+  const {data: profiles, error: profileError} = await supabaseClient
+    .from("profiles")
+    .select("id,full_name,email,employee_id,department,role")
+    .in("id", ids);
+
+  if (profileError) throw profileError;
+
+  const byId = Object.fromEntries(
+    (profiles || []).map(p => [p.id, p])
+  );
+
+  return leaves.map(l => ({
+    ...l,
+    employee_profile: byId[l.employee_id] || null,
+    hod_profile: byId[l.hod_reviewed_by] || null,
+    principal_profile: byId[l.principal_reviewed_by] || null
+  }));
 }
 
 async function approvalDashboard(role) {
@@ -277,30 +293,44 @@ async function approvalDashboard(role) {
 }
 
 function renderReviewCard(l) {
+  const employee = l.employee_profile;
+  const employeeName = employee?.full_name || "Unknown Employee";
+  const employeeDepartment = employee?.department || "Department not assigned";
+  const hod = l.hod_profile;
+  const hodName = hod?.full_name || "HOD";
+  const hodDepartment = hod?.department || employeeDepartment;
+
   return `<div class="review-card">
     <div class="review-top"><div>
       <h4>${esc(l.leave_type)} · ${l.days} day(s)</h4>
-      <p><strong>${esc(l.employee?.full_name || "Unknown Employee")}</strong>${l.employee?.department ? ` · ${esc(l.employee.department)}` : ""}</p>
+      <p><strong>${esc(employeeName)}</strong>${employee?.employee_id ? ` · Employee ID: ${esc(employee.employee_id)}` : ""}</p>
     </div>${statusBadge(l.status)}</div>
+
     <div class="details">
+      <div class="detail"><small>Department</small><strong>${esc(employeeDepartment)}</strong></div>
       <div class="detail"><small>Start</small><strong>${esc(l.start_date)}</strong></div>
       <div class="detail"><small>End</small><strong>${esc(l.end_date)}</strong></div>
       <div class="detail"><small>Submitted</small><strong>${new Date(l.submitted_at).toLocaleDateString()}</strong></div>
     </div>
-    <div class="reason"><strong>Reason</strong><br>${esc(l.reason)}</div>
-    <div class="reason"><strong>Class arrangement</strong><br>${esc(l.class_arrangement)}</div>
+
+    <div class="reason">
+      <strong>Employee</strong><br>
+      ${esc(employeeName)}
+      ${employee?.email ? `<br><span class="kpi-note">${esc(employee.email)}</span>` : ""}
+      <br><span class="kpi-note">Department: ${esc(employeeDepartment)}</span>
+    </div>
+
     ${state.profile.role === "principal" ? `
       <div class="reason">
-        <strong>Employee</strong><br>${esc(l.employee?.full_name || "Unknown Employee")}
-        ${l.employee?.email ? `<br><span class="kpi-note">${esc(l.employee.email)}</span>` : ""}
-        ${l.employee?.department ? `<br><span class="kpi-note">Department: ${esc(l.employee.department)}</span>` : ""}
-      </div>
-      <div class="reason">
         <strong>HOD Approval</strong><br>
-        ${esc(l.hod_decision || "")}
+        ${esc(hodName)} · ${esc(hodDepartment)} Department
         ${l.hod_reviewed_at ? `<br><span class="kpi-note">Approved on ${new Date(l.hod_reviewed_at).toLocaleDateString()}</span>` : ""}
         ${l.hod_remarks ? `<br><span class="kpi-note">Remarks: ${esc(l.hod_remarks)}</span>` : ""}
       </div>` : ""}
+
+    <div class="reason"><strong>Reason</strong><br>${esc(l.reason)}</div>
+    <div class="reason"><strong>Class arrangement</strong><br>${esc(l.class_arrangement)}</div>
+
     <div class="action-row">
       <button class="btn btn-success" onclick="openDecision('${l.id}','approved')">Approve</button>
       <button class="btn btn-danger" onclick="openDecision('${l.id}','rejected')">Reject</button>
@@ -366,7 +396,7 @@ function openCreateUser(){
       <div><label>Full name</label><input id="newName"></div>
       <div><label>Email</label><input id="newEmail" type="email"></div>
       <div><label>Employee ID</label><input id="newEmployeeId" placeholder="Optional"></div>
-      <div><label>Department</label><select id="newDepartment"><option value="">Select department</option>${DEPARTMENTS.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join("")}</select></div>
+      <div><label>Department</label><input id="newDepartment" placeholder="Optional"></div>
       <div class="full"><label>Role</label><select id="newRole"><option value="employee">Employee</option><option value="hod">HOD</option><option value="principal">Principal</option></select></div>
     </div>
     <div class="modal-actions"><button class="btn btn-light" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="createUser()">Create User</button></div>
@@ -382,10 +412,6 @@ async function createUser(){
     role:$("newRole").value
   };
   if(!body.email||!body.full_name){toast("Name and email are required.","error");return;}
-if((body.role === "employee" || body.role === "hod") && !body.department){
-  toast("Select a department for an Employee or HOD.","error");
-  return;
-}
   const {data:{session}}=await supabaseClient.auth.getSession();
   const res=await fetch(`${SUPABASE_URL}/functions/v1/create-user`,{
     method:"POST",
