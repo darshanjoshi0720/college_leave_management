@@ -45,10 +45,6 @@ function statusBadge(status) {
   return `<span class="status ${esc(status)}">${esc(statusLabel(status))}</span>`;
 }
 
-// Departments shown in the Admin "Create User" form.
-// Add/remove departments here if your institution uses a different list.
-const DEPARTMENTS = ["ECE", "CSE", "EEE", "MECH", "CIVIL", "IT", "AI&DS"];
-
 function showLogin() {
   $("loginView").classList.remove("hidden");
   $("appView").classList.add("hidden");
@@ -124,7 +120,7 @@ function renderDashboard() {
 async function fetchEmployeeLeaves() {
   const { data, error } = await supabaseClient
     .from("leave_applications")
-    .select("id,employee_id,department,leave_type,start_date,end_date,days,reason,class_arrangement,status,hod_decision,hod_remarks,principal_decision,principal_remarks,submitted_at")
+    .select("id,employee_id,leave_type,start_date,end_date,days,reason,class_arrangement,status,hod_decision,hod_remarks,principal_decision,principal_remarks,submitted_at")
     .eq("employee_id", state.user.id)
     .order("submitted_at", { ascending:false });
   if (error) throw error;
@@ -164,9 +160,9 @@ function stat(label,value,hint) {
 function renderLeaveTable(leaves, includeEmployee=true) {
   if (!leaves.length) return `<div class="empty">No leave applications found.</div>`;
   return `<div class="table-wrap"><table><thead><tr>
-    ${includeEmployee ? "<th>Employee</th><th>Department</th>" : ""}<th>Leave Type</th><th>Dates</th><th>Days</th><th>Status</th><th>Submitted</th>
+    ${includeEmployee ? "<th>Employee</th>" : ""}<th>Leave Type</th><th>Dates</th><th>Days</th><th>Status</th><th>Submitted</th>
   </tr></thead><tbody>${leaves.map(l => `<tr>
-    ${includeEmployee ? `<td>${esc(l.employee_name || l.employee_profile?.full_name || l.employee_id)}</td><td>${esc(l.department || l.employee_profile?.department || "—")}</td>` : ""}
+    ${includeEmployee ? `<td>${esc(l.employee_name || l.employee_id)}</td>` : ""}
     <td><strong>${esc(l.leave_type)}</strong></td>
     <td>${esc(l.start_date)} → ${esc(l.end_date)}</td>
     <td>${l.days}</td><td>${statusBadge(l.status)}</td>
@@ -226,12 +222,7 @@ async function submitLeave() {
     toast("End date cannot be before start date.", "error"); return;
   }
   const { data, error } = await supabaseClient.rpc("submit_leave", p);
-  if (error) {
-    console.error(error);
-    toast(error.message, "error");
-    return;
-  }
-
+  if (error) { console.error(error); toast(error.message, "error"); return; }
   toast("Leave application submitted to the HOD.", "success");
   navigate("my-leaves");
 }
@@ -244,69 +235,101 @@ async function renderMyLeaves() {
 }
 
 async function fetchRoleLeaves(statuses=null) {
-  // Use the protected server-side RPC so HOD/Principal users can see
-  // employee names without requiring direct access to every profiles row.
-  const { data, error } = await supabaseClient.rpc("get_leave_applications", {
-    p_statuses: statuses || null
+  let q = supabaseClient
+    .from("leave_applications")
+    .select(`
+      id,employee_id,department,leave_type,start_date,end_date,days,reason,class_arrangement,
+      status,hod_decision,hod_remarks,hod_reviewed_by,hod_reviewed_at,
+      principal_decision,principal_remarks,principal_reviewed_by,principal_reviewed_at,submitted_at
+    `)
+    .order("submitted_at",{ascending:true});
+
+  if (statuses) q = q.in("status", statuses);
+
+  const {data,error}=await q;
+  if(error) throw error;
+
+  const leaves = data || [];
+  if (!leaves.length) return leaves;
+
+  const profilesById = {};
+
+  // For an HOD, load the employees assigned to THAT HOD.
+  // This is department-independent: ECE, CSE, EEE, etc. all use the
+  // same hod_id relationship.
+  if (state.profile.role === "hod") {
+    const {data: employees, error: employeeError} = await supabaseClient
+      .from("profiles")
+      .select("id,full_name,email,department,role,hod_id")
+      .eq("hod_id", state.user.id)
+      .eq("role", "employee")
+      .eq("active", true);
+
+    if (employeeError) {
+      console.warn("Could not load employees assigned to this HOD:", employeeError);
+    } else {
+      (employees || []).forEach(p => {
+        profilesById[p.id] = p;
+      });
+    }
+  }
+
+  // Also load the exact profile IDs referenced by the applications.
+  // This supports Principal/Admin views and remains independent of department.
+  const profileIds = [...new Set(
+    leaves.flatMap(l => [
+      l.employee_id,
+      l.hod_reviewed_by,
+      l.principal_reviewed_by
+    ].filter(Boolean))
+  )];
+
+  if (profileIds.length) {
+    const {data: profiles, error: profileError} = await supabaseClient
+      .from("profiles")
+      .select("id,full_name,email,department,role,hod_id")
+      .in("id", profileIds);
+
+    if (profileError) {
+      console.warn("Could not load referenced profiles:", profileError);
+    } else {
+      (profiles || []).forEach(p => {
+        profilesById[p.id] = p;
+      });
+    }
+  }
+
+  return leaves.map(l => {
+    const employee = profilesById[l.employee_id] || null;
+    const hod = profilesById[l.hod_reviewed_by] || null;
+    const principal = profilesById[l.principal_reviewed_by] || null;
+
+    return {
+      ...l,
+      department: l.department || employee?.department || null,
+      employee_profile: employee,
+      hod_profile: hod,
+      principal_profile: principal,
+      employee_name: employee?.full_name || null
+    };
   });
-  if (error) throw error;
-
-  const leaves = (data || []).map(l => ({
-    ...l,
-    employee_name: l.employee_name || null,
-    employee_profile: l.employee_name ? {
-      id: l.employee_id,
-      full_name: l.employee_name,
-      email: l.employee_email,
-      department: l.employee_department || l.department,
-      role: "employee"
-    } : null,
-    hod_profile: l.hod_name ? {
-      id: l.hod_id || l.hod_reviewed_by,
-      full_name: l.hod_name,
-      email: l.hod_email,
-      department: l.hod_department || l.department,
-      role: "hod"
-    } : null,
-    principal_profile: l.principal_name ? {
-      id: l.principal_reviewed_by,
-      full_name: l.principal_name,
-      email: l.principal_email,
-      department: l.principal_department,
-      role: "principal"
-    } : null
-  }));
-
-  return leaves;
 }
 
 async function renderApprovals() {
-  if (state.profile.role === "hod") return approvalDashboard("HOD");
-  if (state.profile.role === "principal") return approvalDashboard("Principal");
-  throw new Error("Approval section is not available for this account.");
-}
-
-function adminDashboard() {
-  const leaves = state.leaves || [];
-  const pending = leaves.filter(x => x.status === "pending_hod").length;
-  const awaiting = leaves.filter(x => x.status === "awaiting_principal").length;
-  const approved = leaves.filter(x => x.status === "approved").length;
-  $("content").innerHTML = `
-    <div class="welcome"><div><div class="eyebrow">ADMINISTRATION</div><h2>Administration dashboard</h2><p>Manage users and monitor the two-stage leave workflow.</p></div></div>
-    <div class="grid stats">
-      ${stat("Pending HOD",pending,"Waiting for department HOD")}
-      ${stat("Awaiting Principal",awaiting,"HOD-approved requests")}
-      ${stat("Approved",approved,"Final approved")}
-      ${stat("Departments",DEPARTMENTS.length,"Configured departments")}
-    </div>
-    <div class="panel"><div class="panel-head"><div><h3>Administration</h3><p>Use the navigation to manage users or review all applications.</p></div></div></div>`;
+  if (state.profile.role === "hod") {
+    return approvalDashboard("HOD");
+  }
+  if (state.profile.role === "principal") {
+    return approvalDashboard("Principal");
+  }
+  throw new Error("This section is only available to HODs and the Principal.");
 }
 
 async function approvalDashboard(role) {
   const statuses = role === "HOD" ? ["pending_hod"] : ["awaiting_principal"];
   const leaves = await fetchRoleLeaves(statuses);
   $("content").innerHTML = `
-    <div class="welcome"><div><div class="eyebrow">${role.toUpperCase()} PORTAL</div><h2>${role === "HOD" ? "Leave approvals" : "Final approvals"}</h2><p>${leaves.length} application(s) require your attention.</p><p><strong>Department:</strong> ${esc(state.profile.department || "Not assigned")}</p></div></div>
+    <div class="welcome"><div><div class="eyebrow">${role.toUpperCase()} PORTAL</div><h2>${role === "HOD" ? "Leave approvals" : "Final approvals"}</h2><p>${leaves.length} application(s) require your attention.</p>${role === "HOD" ? `<p><strong>Department:</strong> ${esc(state.profile.department || "Not assigned")}</p>` : ""}</div></div>
     <div class="grid stats">${stat("Awaiting Review",leaves.length,role==="HOD"?"Pending HOD decision":"HOD-approved requests")}${stat("Approval Stage",role==="HOD"?"HOD":"Principal","Current responsibility")}${stat("Required Action",leaves.length,"Review applications")}${stat("Workflow","2-step","HOD + Principal")}</div>
     <div class="panel"><div class="panel-head"><div><h3>${role === "HOD" ? "Pending HOD applications" : "HOD-approved applications"}</h3><p>Review the details before making a decision.</p></div></div><div class="panel-body" id="reviewList">${leaves.length ? leaves.map(renderReviewCard).join("") : `<div class="empty">No applications are waiting for you.</div>`}</div></div>`;
 }
@@ -322,7 +345,7 @@ function renderReviewCard(l) {
   return `<div class="review-card">
     <div class="review-top"><div>
       <h4>${esc(l.leave_type)} · ${l.days} day(s)</h4>
-      <p><strong>${esc(employeeName)}</strong>${""}</p>
+      <p><strong>${esc(employeeName)}</strong></p>
     </div>${statusBadge(l.status)}</div>
 
     <div class="details">
@@ -385,7 +408,7 @@ async function renderHistory() {
 }
 
 async function renderUsers() {
-  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,department,role,active").order("role").order("full_name");
+  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,employee_id,department,role,active").order("role").order("full_name");
   if(error) throw error;
   state.users=data||[];
   $("content").innerHTML = `<div class="welcome"><div><div class="eyebrow">ADMINISTRATION</div><h2>User management</h2><p>Create and manage institutional accounts.</p></div><button class="btn btn-primary" onclick="openCreateUser()">＋ Create User</button></div>
@@ -418,7 +441,13 @@ function openCreateUser(){
       <div><label>Department</label>
         <select id="newDepartment">
           <option value="">Select department</option>
-          ${DEPARTMENTS.map(d => `<option value="${esc(d)}">${esc(d)}</option>`).join("")}
+          <option value="ECE">ECE</option>
+          <option value="CSE">CSE</option>
+          <option value="EEE">EEE</option>
+          <option value="MECH">MECH</option>
+          <option value="CIVIL">CIVIL</option>
+          <option value="IT">IT</option>
+          <option value="AI&DS">AI&DS</option>
         </select>
       </div>
       <div class="full"><label>Role</label><select id="newRole"><option value="employee">Employee</option><option value="hod">HOD</option><option value="principal">Principal</option></select></div>
@@ -435,11 +464,7 @@ async function createUser(){
     department:$("newDepartment").value.trim()||null,
     role:$("newRole").value
   };
-  if(!body.email||!body.full_name){
-    toast("Name and email are required.","error");
-    return;
-  }
-
+  if(!body.email||!body.full_name){toast("Name and email are required.","error");return;}
   if((body.role === "employee" || body.role === "hod") && !body.department){
     toast("Please select a department for an employee or HOD.","error");
     return;
@@ -474,7 +499,7 @@ async function init() {
 }
 
 async function loadProfile(user){
-  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,department,role,active").eq("id",user.id).single();
+  const {data,error}=await supabaseClient.from("profiles").select("id,email,full_name,employee_id,department,role,active").eq("id",user.id).single();
   if(error || !data || !data.active){await supabaseClient.auth.signOut();showLogin();toast("Your active portal profile could not be loaded.","error");return;}
   state.user=user; state.profile=data; showApp();
 }
@@ -516,6 +541,7 @@ supabaseClient.auth.onAuthStateChange(async(event,session)=>{
 });
 
 window.navigate=navigate;
+window.renderApprovals=renderApprovals;
 window.submitLeave=submitLeave;
 window.openDecision=openDecision;
 window.closeModal=closeModal;
